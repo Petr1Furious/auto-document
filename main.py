@@ -1,7 +1,5 @@
-import threading
-import time
 import multiprocessing
-
+import time
 import docx
 import easywebdav
 from easywebdav import OperationFailed
@@ -14,37 +12,50 @@ from urllib.parse import unquote
 
 
 def make_defaults():
-    existing = []
+    existing_config = []
     if os.path.exists('config.yml'):
         parsed = yaml.safe_load(open('config.yml'))
         if parsed is not None:
-            existing = list(parsed)
+            existing_config = list(parsed)
 
-    desc = ['Имя пользователя', 'Пароль для приложения', 'Путь к таблице', 'Название листа для студентов',
-            'Название листа для руководителей', 'Путь для документов',
+    desc = ['Имя пользователя, почта, к которой привязан соответствующий диск',
+            'Пароль для приложения. Никому не отправляйте этот пароль или этот файл!\n'
+            'Чтобы сгенерировать, зайдите на https://passport.yandex.ru/profile, раздел \"Пароли и авторизация\", '
+            '\"Создать пароль приложения\" (под \"Пароли приложений\"), \"Файлы\" и введите любое название.\n'
+            'После этого скопируйте пароль внутрь кавычек на следующей строке.',
+            'Путь к таблице на диске', 'Название листа для студентов', 'Название листа для руководителей',
+            'Путь для документов от руководителей на диске', 'Путь для документов от студентов на диске',
             'Начальный ряд для обработки в листе для студентов',
             'Конечный ряд для обработки в листе для студентов или 0, если нужно идти до конца таблицы',
             'Начальный ряд для обработки в листе для руководителей',
+            'Количество потоков для загрузки документов, 0 для отключения лимита',
             'Конечный ряд для обработки в листе для руководителей или 0, если нужно идти до конца таблицы',
-            'Перезаписать существующие документы']
-    names = ['username', 'password', 'table-path', 'leaders-sheet-name', 'students-sheet-name', 'documents-path',
-             'leaders-first-row', 'leaders-last-row', 'students-first-row', 'students-last-row',
-             'overwrite-existing-documents']
-    values = ['', '', '/table.xlsx', 'ВЫГРУЗКАЗаявки от руководителей', 'ВЫГРУЗКА Инициативные заявки', '/', 3, 0,
-              2, 0, False]
+            'Перезаписать существующие документы\nFalse - если на диске уже есть файл с совпадающим названием, он не '
+            'будет перезаписан (загружается быстрее)\nTrue - созданный документ с совпадающим названием перезапишет '
+            'тот, который на диске']
+    names = ['username', 'password', 'table-path', 'leaders-sheet-name', 'students-sheet-name',
+             'leaders-documents-path', 'students-documents-path', 'leaders-first-row', 'leaders-last-row',
+             'students-first-row', 'students-last-row', 'threads-count', 'overwrite-existing-documents']
+    values = ['', '', '/Таблица с заявками.xlsx',
+              'ВЫГРУЗКАЗаявки от руководителей', 'ВЫГРУЗКА Инициативные заявки', '/', '/', 2, 0, 2, 0, 10, False]
 
     f = open('config.yml', 'a')
 
     for i in range(len(desc)):
-        if names[i] not in existing:
+        if names[i] not in existing_config:
             if desc[i] != '':
-                f.write('# ' + desc[i] + '\n')
+                lines = desc[i].split('\n')
+                for line in lines:
+                    f.write('# ' + line + '\n')
             f.write(names[i] + ': ')
             if isinstance(values[i], str):
                 f.write('\'' + values[i] + '\'')
             else:
                 f.write(str(values[i]))
-            f.write('\n')
+            f.write('\n\n')
+
+    if names[0] not in existing_config:
+        exit(0)
 
 
 def load_config():
@@ -53,7 +64,7 @@ def load_config():
 
 def get_person_name(s):
     words = s.split(' ')
-    return words[0] + ' ' + [word[0].upper() + '.' for word in words[1:]]
+    return words[0] + ' ' + [word[0].upper() + '' for word in words[1:]]
 
 
 def get_project_name(s):
@@ -80,19 +91,25 @@ def mystr(cell_text):
     return '' if cell_text is None else str(cell_text)
 
 
-def get_file_name(name, surname, patronymic, project_name):
-    return 'Описание проекта_' + mystr(name) + ' ' + mystr(surname)[0] + '.' + \
-           (' ' + mystr(patronymic)[0] + '.' if patronymic is not None and patronymic != '-' else '') + \
+def get_file_name_leader(name, surname, patronymic, project_name):
+    return 'Описание проекта_' + mystr(name) + ' ' + mystr(surname)[0] + \
+           (' ' + mystr(patronymic)[0] + '' if patronymic is not None and patronymic != '-' else '') + \
            '_' + mystr(project_name) + '.docx'
+
+
+def get_file_name_student(name, project_name):
+    words = name.split(' ')
+    return 'Описание проекта_' + words[0].capitalize() + ' ' + '. '.join([word[0].upper() for word in words[1:]]) + \
+           '._' + mystr(project_name) + '.docx'
 
 
 def make_document_leader(row):
     if row[3] is None or row[4] is None:
         return
 
-    doc = docx.Document('template.docx')
+    leader_doc = docx.Document('template_leader.docx')
 
-    rows = doc.tables[0].rows
+    rows = leader_doc.tables[0].rows
     rows[0].cells[1].text = mystr(row[25])
     rows[1].cells[1].text = get_project_name(mystr(row[26]))
     rows[2].cells[1].text = mystr(row[27])
@@ -111,7 +128,35 @@ def make_document_leader(row):
     rows[16].cells[1].text = 'На email ' + mystr(row[6]) + '\n\n1 сентября 2022 по 15 октября 2022'
     rows[17].cells[1].text = join(row[36], row[37], row[39], sep='\n')
 
-    doc.save(get_file_name(row[3], row[4], row[5], row[25]))
+    leader_doc.save('leaders_docs' + os.sep + get_file_name_leader(row[3], row[4], row[5], row[25]))
+
+
+def make_document_student(row):
+    if row[3] is None or row[4] is None:
+        return
+
+    student_doc = docx.Document('template_student.docx')
+
+    rows = student_doc.tables[0].rows
+    rows[0].cells[1].text = mystr(row[22])
+    rows[1].cells[1].text = get_project_name(mystr(row[23]))
+    rows[2].cells[1].text = mystr(row[24])
+    rows[3].cells[1].text = join(row[25], row[26])
+    rows[4].cells[1].text = \
+        '1' if mystr(row[25]) == 'Индивидуальный' or mystr(row[26]) == 'Индивидуальный' else mystr(row[27])
+    rows[5].cells[1].text = mystr(row[3]) + ' ' + mystr(row[4]) + ' ' + ('' if row[5] == '-' else mystr(row[5]))
+    rows[6].cells[1].text = mystr(row[9]) + ', ' + mystr(row[10])
+    rows[7].cells[1].text = mystr(row[12]) + '\n' + join(join(row[16], row[18], row[20], sep=' '),
+                                                         mystr(row[21]), sep=', ')
+    rows[8].cells[1].text = mystr(row[30])
+    rows[9].cells[1].text = mystr(row[31])
+    rows[10].cells[1].text = mystr(row[32])
+    rows[11].cells[1].text = mystr(row[33])
+    rows[12].cells[1].text = mystr(row[34])
+    rows[14].cells[1].text = mystr(row[29])
+    rows[15].cells[1].text = 'На email ' + mystr(row[6]) + '\n\n1 сентября 2022 по 15 октября 2022'
+
+    student_doc.save('students_docs' + os.sep + get_file_name_student(row[12], row[22]))
 
 
 def make_documents(leaders_sheet, func, first_row, last_row):
@@ -125,26 +170,73 @@ def upload(webdav, local_path, remote_path):
     webdav.upload(local_path, remote_path)
 
 
+def clear_files():
+    if os.path.exists('table.xlsx'):
+        os.remove('table.xlsx')
+
+    if os.path.exists('leaders_docs'):
+        for existing in os.listdir('leaders_docs'):
+            os.remove('leaders_docs' + os.sep + existing)
+
+        os.removedirs("leaders_docs")
+
+    if os.path.exists('students_docs'):
+        for existing in os.listdir('students_docs'):
+            os.remove('students_docs' + os.sep + existing)
+        os.removedirs("students_docs")
+
+
+def do_threads(threads, threads_count):
+    started_set = set()
+    old_completed_count = -1
+    while True:
+        completed_count = 0
+        running_count = 0
+        for i in range(len(threads)):
+            if not threads[i].is_alive() and i in started_set:
+                completed_count += 1
+            if threads[i].is_alive():
+                running_count += 1
+
+        if old_completed_count != completed_count:
+            print(str(completed_count) + ' / ' + str(len(threads)))
+            old_completed_count = completed_count
+
+        if completed_count == len(threads):
+            break
+
+        if running_count < threads_count or threads_count == 0:
+            for i in range(len(threads)):
+                if i not in started_set:
+                    started_set.add(i)
+                    threads[i].start()
+                    running_count += 1
+                    if running_count == threads_count:
+                        break
+
+        time.sleep(0.05)
+
+
 def try_upload():
     try:
         config = load_config()
-
-        # password = 'hlhijtvxlwjuyrpl'
 
         try:
             webdav = easywebdav.connect('webdav.yandex.ru', username=config['username'],
                                         password=config['password'], protocol='https')
             webdav.ls()
-        except ConnectionError as e:
+        except ConnectionError:
             print('Отсутствует подключение к интернету.')
             return False
-        except OperationFailed as e:
+        except OperationFailed:
             print('Неверный логин или пароль.')
             return False
 
+        clear_files()
+
         try:
             webdav.download(config['table-path'], 'table.xlsx')
-        except OperationFailed as e:
+        except OperationFailed:
             print('По заданному пути таблица не найдена.')
             return False
 
@@ -152,33 +244,40 @@ def try_upload():
         leaders_sheet = workbook[config['leaders-sheet-name']]
         students_sheet = workbook[config['students-sheet-name']]
 
+        os.makedirs('leaders_docs')
+        os.makedirs('students_docs')
         make_documents(leaders_sheet, make_document_leader,
                        config['leaders-first-row'] - 1, config['leaders-last-row'] - 1)
+        make_documents(students_sheet, make_document_student,
+                       config['students-first-row'] - 1, config['students-last-row'] - 1)
 
-        documents_list = []
         try:
-            documents_list = webdav.ls(config['documents-path'])
-        except OperationFailed as e:
+            leaders_documents_list = webdav.ls(config['leaders-documents-path'])
+            students_documents_list = webdav.ls(config['students-documents-path'])
+        except OperationFailed:
             print('Папка для документов не найдена.')
             return False
 
-        documents_names_list = [os.path.splitext(os.path.basename(unquote(x.name)))[0] for x in documents_list if
-                                os.path.splitext(os.path.basename(unquote(x.name)))[1] == '.docx']
+        leaders_documents_names = [os.path.splitext(os.path.basename(unquote(x.name)))[0]
+                                   for x in leaders_documents_list if
+                                   os.path.splitext(os.path.basename(unquote(x.name)))[1] == '.docx']
+        students_documents_names = [os.path.splitext(os.path.basename(unquote(x.name)))[0]
+                                    for x in students_documents_list if
+                                    os.path.splitext(os.path.basename(unquote(x.name)))[1] == '.docx']
 
         threads = []
-        for file in [f for f in os.listdir() if os.path.isfile(f)]:
-            filename, file_extension = os.path.splitext(file)
-            if file_extension == '.docx' and not filename == 'template':
-                if config['overwrite-existing-documents'] or documents_names_list.count(filename) == 0:
-                    threads.append(multiprocessing.Process(
-                        target=upload, args=(webdav, str(file), config['documents-path'] + str(file))))
-                    # webdav.upload(str(file), config['documents-path'] + str(file))
+        for file in os.listdir('leaders_docs'):
+            if config['overwrite-existing-documents'] or leaders_documents_names.count(os.path.splitext(file)[0]) == 0:
+                threads.append(multiprocessing.Process(
+                    target=upload,
+                    args=(webdav, 'leaders_docs' + os.sep + file, config['leaders-documents-path'] + file)))
+        for file in os.listdir('students_docs'):
+            if config['overwrite-existing-documents'] or students_documents_names.count(os.path.splitext(file)[0]) == 0:
+                threads.append(multiprocessing.Process(
+                    target=upload,
+                    args=(webdav, 'students_docs' + os.sep + file, config['students-documents-path'] + file)))
 
-        for thread in threads:
-            thread.start()
-
-        for thread in threads:
-            thread.join()
+        do_threads(threads, config['threads-count'])
 
         os.remove('table.xlsx')
     except OperationFailed as e:
@@ -187,9 +286,9 @@ def try_upload():
     except ConnectionError as e:
         print('Ошибка подключения: ' + str(e))
         return False
-    # except Exception as e:
-    #     print('Ошибка: ' + str(e))
-    #     return False
+    except Exception as e:
+        print('Ошибка: ' + str(e))
+        return False
 
     return True
 
@@ -197,12 +296,11 @@ def try_upload():
 if __name__ == '__main__':
     make_defaults()
 
+    start_time = time.time()
     if try_upload():
         print('Документы успешно созданы и загружены.')
     else:
-        print('Документы не были созданы или загружены')
+        print('Документы не были созданы или загружены.')
+    print('Время выполнения: ' + str(time.time() - start_time) + ' с.')
 
-    for file in [f for f in os.listdir() if os.path.isfile(f)]:
-        filename, file_extension = os.path.splitext(file)
-        if (file_extension == ".xlsx" or file_extension == ".docx") and filename != "template":
-            os.remove(file)
+    clear_files()
