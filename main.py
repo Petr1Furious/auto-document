@@ -10,26 +10,30 @@ import os
 import string
 from urllib.parse import unquote
 
+easywebdav.basestring = str
+easywebdav.client.basestring = str
+
 
 def make_defaults():
     existing_config = []
     if os.path.exists('config.yml'):
-        parsed = yaml.safe_load(open('config.yml'))
+        parsed = yaml.safe_load(open('config.yml', 'r', encoding="utf-8"))
         if parsed is not None:
             existing_config = list(parsed)
 
     desc = ['Имя пользователя, почта, к которой привязан соответствующий диск',
             'Пароль для приложения. Никому не отправляйте этот пароль или этот файл!\n'
-            'Чтобы сгенерировать, зайдите на https://passport.yandex.ru/profile, раздел \"Пароли и авторизация\", '
-            '\"Создать пароль приложения\" (под \"Пароли приложений\"), \"Файлы\" и введите любое название.\n'
+            'Чтобы сгенерировать, зайдите на https://passport.yandex.ru/profile, раздел "Пароли и авторизация", '
+            '"Создать пароль приложения" (под "Пароли приложений"), "Файлы" и введите любое название.\n'
             'После этого скопируйте пароль внутрь кавычек на следующей строке.',
             'Путь к таблице на диске', 'Название листа для студентов', 'Название листа для руководителей',
-            'Путь для документов от руководителей на диске', 'Путь для документов от студентов на диске',
+            'Путь к папке для документов от руководителей на диске ("/" на конце обязателен)',
+            'Путь к папке для документов от студентов на диске ("/" на конце обязателен)',
             'Начальный ряд для обработки в листе для студентов',
             'Конечный ряд для обработки в листе для студентов или 0, если нужно идти до конца таблицы',
             'Начальный ряд для обработки в листе для руководителей',
-            'Количество потоков для загрузки документов, 0 для отключения лимита',
             'Конечный ряд для обработки в листе для руководителей или 0, если нужно идти до конца таблицы',
+            'Количество потоков для загрузки документов, 0 для отключения лимита',
             'Перезаписать существующие документы\nFalse - если на диске уже есть файл с совпадающим названием, он не '
             'будет перезаписан (загружается быстрее)\nTrue - созданный документ с совпадающим названием перезапишет '
             'тот, который на диске']
@@ -39,7 +43,7 @@ def make_defaults():
     values = ['', '', '/Таблица с заявками.xlsx',
               'ВЫГРУЗКАЗаявки от руководителей', 'ВЫГРУЗКА Инициативные заявки', '/', '/', 2, 0, 2, 0, 10, False]
 
-    f = open('config.yml', 'a')
+    f = open('config.yml', 'a', encoding="utf-8")
 
     for i in range(len(desc)):
         if names[i] not in existing_config:
@@ -55,11 +59,12 @@ def make_defaults():
             f.write('\n\n')
 
     if names[0] not in existing_config:
+        print('Введите имя пользователя и пароль в config.yml')
         exit(0)
 
 
 def load_config():
-    return yaml.safe_load(open('config.yml'))
+    return yaml.safe_load(open('config.yml', 'r', encoding="utf-8"))
 
 
 def get_person_name(s):
@@ -92,15 +97,20 @@ def mystr(cell_text):
 
 
 def get_file_name_leader(name, surname, patronymic, project_name):
-    return 'Описание проекта_' + mystr(name) + ' ' + mystr(surname)[0] + \
-           (' ' + mystr(patronymic)[0] + '' if patronymic is not None and patronymic != '-' else '') + \
-           '_' + mystr(project_name) + '.docx'
+    return ('Описание проекта_' + mystr(name).capitalize() + ' ' + mystr(surname)[0].upper() + '.' +
+            (' ' + mystr(patronymic)[0].upper() + '.' if patronymic is not None and patronymic != '-' else '') +
+            '_' + mystr(project_name) + '.docx').replace('/', '_').replace('\\', '_')
 
 
 def get_file_name_student(name, project_name):
     words = name.split(' ')
-    return 'Описание проекта_' + words[0].capitalize() + ' ' + '. '.join([word[0].upper() for word in words[1:]]) + \
-           '._' + mystr(project_name) + '.docx'
+    name = ''
+    if len(words) >= 1:
+        name = words[0].capitalize()
+        if len(words) >= 2:
+            name += ' ' + '. '.join([word[0].upper() for word in words[1:]]) + '.'
+        name += '_'
+    return ('Описание проекта_' + name + mystr(project_name) + '.docx').replace('/', '_').replace('\\', '_')
 
 
 def make_document_leader(row):
@@ -162,8 +172,15 @@ def make_document_student(row):
 def make_documents(leaders_sheet, func, first_row, last_row):
     values_table = [[c.value for c in r] for r in leaders_sheet.rows]
 
-    for i in range(first_row, len(values_table) if last_row == -1 else last_row + 1):
+    size = len(values_table) if last_row == -1 else last_row + 1
+    total = size - first_row
+    for i in range(first_row, size):
         func(values_table[i])
+        done = i - first_row + 1
+        if done % 10 == 0:
+            print(str(done) + ' / ' + str(total))
+    if total % 10 != 0:
+        print(str(total) + ' / ' + str(total))
 
 
 def upload(webdav, local_path, remote_path):
@@ -214,7 +231,7 @@ def do_threads(threads, threads_count):
                     if running_count == threads_count:
                         break
 
-        time.sleep(0.05)
+        time.sleep(0.1)
 
 
 def try_upload():
@@ -246,8 +263,10 @@ def try_upload():
 
         os.makedirs('leaders_docs')
         os.makedirs('students_docs')
+        print('Генерация документов от руководителей.')
         make_documents(leaders_sheet, make_document_leader,
                        config['leaders-first-row'] - 1, config['leaders-last-row'] - 1)
+        print('Генерация документов от студентов.')
         make_documents(students_sheet, make_document_student,
                        config['students-first-row'] - 1, config['students-last-row'] - 1)
 
@@ -277,6 +296,7 @@ def try_upload():
                     target=upload,
                     args=(webdav, 'students_docs' + os.sep + file, config['students-documents-path'] + file)))
 
+        print('Загрузка документов на диск.')
         do_threads(threads, config['threads-count'])
 
         os.remove('table.xlsx')
@@ -294,6 +314,7 @@ def try_upload():
 
 
 if __name__ == '__main__':
+    multiprocessing.freeze_support()
     make_defaults()
 
     start_time = time.time()
@@ -301,6 +322,6 @@ if __name__ == '__main__':
         print('Документы успешно созданы и загружены.')
     else:
         print('Документы не были созданы или загружены.')
-    print('Время выполнения: ' + str(time.time() - start_time) + ' с.')
+    print('Время выполнения: ' + str(round(time.time() - start_time, 2)) + ' с.')
 
     clear_files()
