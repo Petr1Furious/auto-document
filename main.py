@@ -9,6 +9,7 @@ import yaml
 import os
 import string
 from urllib.parse import unquote
+from sys import exit
 
 easywebdav.basestring = str
 easywebdav.client.basestring = str
@@ -61,8 +62,14 @@ def make_defaults():
 
     f = open('config.yml', 'a', encoding="utf-8")
 
+    first = True
     for i in range(len(desc)):
         if names[i] not in existing_config:
+            if first and len(existing_config) == 0:
+                first = False
+            else:
+                f.write('\n')
+
             if desc[i] != '':
                 lines = desc[i].split('\n')
                 for line in lines:
@@ -72,7 +79,7 @@ def make_defaults():
                 f.write('\'' + values[i] + '\'')
             else:
                 f.write(str(values[i]))
-            f.write('\n\n')
+            f.write('\n')
 
     if names[0] not in existing_config:
         print('Введите имя пользователя и пароль в config.yml')
@@ -112,13 +119,13 @@ def mystr(cell_text):
     return '' if cell_text is None else str(cell_text)
 
 
-def get_file_name_leader(name, surname, patronymic, project_name):
+def get_filename_leader(name, surname, patronymic, project_name):
     return ('Описание проекта_' + mystr(name).capitalize() + ' ' + mystr(surname)[0].upper() + '.' +
             (' ' + mystr(patronymic)[0].upper() + '.' if patronymic is not None and patronymic != '-' else '') +
-            '_' + mystr(project_name) + '.docx').replace('/', '_').replace('\\', '_')
+            '_' + mystr(project_name)).replace('/', '_').replace('\\', '_')
 
 
-def get_file_name_student(name, project_name):
+def get_filename_student(name, project_name):
     words = name.split(' ')
     name = ''
     if len(words) >= 1:
@@ -126,12 +133,34 @@ def get_file_name_student(name, project_name):
         if len(words) >= 2:
             name += ' ' + '. '.join([word[0].upper() for word in words[1:]]) + '.'
         name += '_'
-    return ('Описание проекта_' + name + mystr(project_name) + '.docx').replace('/', '_').replace('\\', '_')
+    return ('Описание проекта_' + name + mystr(project_name)).replace('/', '_').replace('\\', '_')
 
 
-def make_document_leader(row):
+def count_documents_leaders(rows, existing_documents, first_row, size):
+    res = 0
+    for row in rows[first_row:size]:
+        filename = get_filename_leader(row[3], row[4], row[5], row[25])
+        if filename not in existing_documents:
+            res += 1
+    return res
+
+
+def count_documents_students(rows, existing_documents, first_row, size):
+    res = 0
+    for row in rows[first_row:size]:
+        filename = get_filename_student(row[12], row[22])
+        if filename not in existing_documents:
+            res += 1
+    return res
+
+
+def make_document_leader(row, existing_documents):
     if row[3] is None or row[4] is None:
-        return
+        return False
+
+    filename = get_filename_leader(row[3], row[4], row[5], row[25])
+    if filename in existing_documents:
+        return False
 
     leader_doc = docx.Document('template_leader.docx')
 
@@ -154,12 +183,17 @@ def make_document_leader(row):
     rows[16].cells[1].text = 'На email ' + mystr(row[6]) + '\n\n1 сентября 2022 по 15 октября 2022'
     rows[17].cells[1].text = join(row[36], row[37], row[39], sep='\n')
 
-    leader_doc.save('leaders_docs' + os.sep + get_file_name_leader(row[3], row[4], row[5], row[25]))
+    leader_doc.save('leaders_docs' + os.sep + filename + '.docx')
+    return True
 
 
-def make_document_student(row):
+def make_document_student(row, existing_documents):
     if row[3] is None or row[4] is None:
-        return
+        return False
+
+    filename = get_filename_student(row[12], row[22])
+    if filename in existing_documents:
+        return False
 
     student_doc = docx.Document('template_student.docx')
 
@@ -182,19 +216,23 @@ def make_document_student(row):
     rows[14].cells[1].text = mystr(row[29])
     rows[15].cells[1].text = 'На email ' + mystr(row[6]) + '\n\n1 сентября 2022 по 15 октября 2022'
 
-    student_doc.save('students_docs' + os.sep + get_file_name_student(row[12], row[22]))
+    student_doc.save('students_docs' + os.sep + filename + '.docx')
+    return True
 
 
-def make_documents(leaders_sheet, func, first_row, last_row):
+def make_documents(leaders_sheet, func, count_func, existing_documents, first_row, last_row):
     values_table = [[c.value for c in r] for r in leaders_sheet.rows]
 
     size = len(values_table) if last_row == -1 else last_row + 1
-    total = size - first_row
+    total = count_func(values_table, existing_documents, first_row, size)
+    done = 0
+
+    print('0 / ' + str(total))
     for i in range(first_row, size):
-        func(values_table[i])
-        done = i - first_row + 1
-        if done % 10 == 0:
-            print(str(done) + ' / ' + str(total))
+        if func(values_table[i], existing_documents):
+            done += 1
+            if done % 10 == 0:
+                print(str(done) + ' / ' + str(total))
     if total % 10 != 0:
         print(str(total) + ' / ' + str(total))
 
@@ -288,15 +326,6 @@ def try_upload():
         leaders_sheet = workbook[config['leaders-sheet-name']]
         students_sheet = workbook[config['students-sheet-name']]
 
-        os.makedirs('leaders_docs')
-        os.makedirs('students_docs')
-        print('Генерация документов от руководителей.')
-        make_documents(leaders_sheet, make_document_leader,
-                       config['leaders-first-row'] - 1, config['leaders-last-row'] - 1)
-        print('Генерация документов от студентов.')
-        make_documents(students_sheet, make_document_student,
-                       config['students-first-row'] - 1, config['students-last-row'] - 1)
-
         leaders_path = fix_folder_path(config['leaders-documents-path'])
         students_path = fix_folder_path(config['students-documents-path'])
         try:
@@ -306,24 +335,34 @@ def try_upload():
             print('Папка для документов не найдена.')
             return False
 
-        leaders_documents_names = [os.path.splitext(os.path.basename(unquote(x.name)))[0]
-                                   for x in leaders_documents_list if
-                                   os.path.splitext(os.path.basename(unquote(x.name)))[1] == '.docx']
-        students_documents_names = [os.path.splitext(os.path.basename(unquote(x.name)))[0]
-                                    for x in students_documents_list if
-                                    os.path.splitext(os.path.basename(unquote(x.name)))[1] == '.docx']
+        leaders_documents_names = []
+        students_documents_names = []
+        if not config['overwrite-existing-documents']:
+            leaders_documents_names = [os.path.splitext(os.path.basename(unquote(x.name)))[0]
+                                       for x in leaders_documents_list if
+                                       os.path.splitext(os.path.basename(unquote(x.name)))[1] == '.docx']
+            students_documents_names = [os.path.splitext(os.path.basename(unquote(x.name)))[0]
+                                        for x in students_documents_list if
+                                        os.path.splitext(os.path.basename(unquote(x.name)))[1] == '.docx']
+
+        os.makedirs('leaders_docs')
+        os.makedirs('students_docs')
+        print('Генерация документов от руководителей.')
+        make_documents(leaders_sheet, make_document_leader, count_documents_leaders, leaders_documents_names,
+                       config['leaders-first-row'] - 1, config['leaders-last-row'] - 1)
+        print('Генерация документов от студентов.')
+        make_documents(students_sheet, make_document_student, count_documents_students, students_documents_names,
+                       config['students-first-row'] - 1, config['students-last-row'] - 1)
 
         threads = []
         for file in os.listdir('leaders_docs'):
-            if config['overwrite-existing-documents'] or leaders_documents_names.count(os.path.splitext(file)[0]) == 0:
-                threads.append(multiprocessing.Process(
-                    target=upload,
-                    args=(webdav, 'leaders_docs' + os.sep + file, leaders_path + file)))
+            threads.append(multiprocessing.Process(
+                target=upload,
+                args=(webdav, 'leaders_docs' + os.sep + file, leaders_path + file)))
         for file in os.listdir('students_docs'):
-            if config['overwrite-existing-documents'] or students_documents_names.count(os.path.splitext(file)[0]) == 0:
-                threads.append(multiprocessing.Process(
-                    target=upload,
-                    args=(webdav, 'students_docs' + os.sep + file, students_path + file)))
+            threads.append(multiprocessing.Process(
+                target=upload,
+                args=(webdav, 'students_docs' + os.sep + file, students_path + file)))
 
         print('Загрузка документов на диск.')
         do_threads(threads, config['threads-count'])
