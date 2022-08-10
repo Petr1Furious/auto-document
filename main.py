@@ -21,22 +21,38 @@ def make_defaults():
         if parsed is not None:
             existing_config = list(parsed)
 
-    desc = ['Имя пользователя, почта, к которой привязан соответствующий диск',
+    desc = ['Почта, к которой привязан яндекс диск',
+
             'Пароль для приложения. Никому не отправляйте этот пароль или этот файл!\n'
             'Чтобы сгенерировать, зайдите на https://passport.yandex.ru/profile, раздел "Пароли и авторизация", '
-            '"Создать пароль приложения" (под "Пароли приложений"), "Файлы" и введите любое название.\n'
-            'После этого скопируйте пароль внутрь кавычек на следующей строке.',
-            'Путь к таблице на диске', 'Название листа для студентов', 'Название листа для руководителей',
-            'Путь к папке для документов от руководителей на диске ("/" на конце обязателен)',
-            'Путь к папке для документов от студентов на диске ("/" на конце обязателен)',
+            '"Включить пароли приложений" (или "Пароли приложений" если пароли приложений использовались ранее), '
+            '"Создать новый пароль", "Файлы" и введите любое название.\n'
+            'После этого скопируйте созданный пароль внутрь кавычек на следующей строке.',
+
+            'Путь к таблице на яндекс диске (например, "/Проекты/Таблица с заявками.xlsx")',
+
+            'Название листа для студентов',
+
+            'Название листа для руководителей',
+
+            'Путь к папке для документов от руководителей на яндекс диске (например, "/Проекты/Руководители/")',
+
+            'Путь к папке для документов от студентов на яндекс диске (например, "/Проекты/Руководители/")',
+
             'Начальный ряд для обработки в листе для студентов',
+
             'Конечный ряд для обработки в листе для студентов или 0, если нужно идти до конца таблицы',
+
             'Начальный ряд для обработки в листе для руководителей',
+
             'Конечный ряд для обработки в листе для руководителей или 0, если нужно идти до конца таблицы',
+
             'Количество потоков для загрузки документов, 0 для отключения лимита',
-            'Перезаписать существующие документы\nFalse - если на диске уже есть файл с совпадающим названием, он не '
-            'будет перезаписан (загружается быстрее)\nTrue - созданный документ с совпадающим названием перезапишет '
-            'тот, который на диске']
+
+            'Перезаписать существующие документы\n'
+            'False - если на яндекс диске уже есть файл с совпадающим названием, он не будет перезаписан '
+            '(загружается быстрее)\n'
+            'True - созданный документ с совпадающим названием перезапишет тот, который уже есть на яндекс диске']
     names = ['username', 'password', 'table-path', 'leaders-sheet-name', 'students-sheet-name',
              'leaders-documents-path', 'students-documents-path', 'leaders-first-row', 'leaders-last-row',
              'students-first-row', 'students-last-row', 'threads-count', 'overwrite-existing-documents']
@@ -234,6 +250,14 @@ def do_threads(threads, threads_count):
         time.sleep(0.1)
 
 
+def fix_folder_path(path):
+    if path == '' or path[0] != '/':
+        path = '/' + path
+    if path[len(path) - 1] != '/':
+        path = path + '/'
+    return path
+
+
 def try_upload():
     try:
         config = load_config()
@@ -252,7 +276,10 @@ def try_upload():
         clear_files()
 
         try:
-            webdav.download(config['table-path'], 'table.xlsx')
+            table_path = config['table-path']
+            if table_path == '' or table_path[0] != '/':
+                table_path = '/' + table_path
+            webdav.download(table_path, 'table.xlsx')
         except OperationFailed:
             print('По заданному пути таблица не найдена.')
             return False
@@ -270,9 +297,11 @@ def try_upload():
         make_documents(students_sheet, make_document_student,
                        config['students-first-row'] - 1, config['students-last-row'] - 1)
 
+        leaders_path = fix_folder_path(config['leaders-documents-path'])
+        students_path = fix_folder_path(config['students-documents-path'])
         try:
-            leaders_documents_list = webdav.ls(config['leaders-documents-path'])
-            students_documents_list = webdav.ls(config['students-documents-path'])
+            leaders_documents_list = webdav.ls(leaders_path)
+            students_documents_list = webdav.ls(students_path)
         except OperationFailed:
             print('Папка для документов не найдена.')
             return False
@@ -289,12 +318,12 @@ def try_upload():
             if config['overwrite-existing-documents'] or leaders_documents_names.count(os.path.splitext(file)[0]) == 0:
                 threads.append(multiprocessing.Process(
                     target=upload,
-                    args=(webdav, 'leaders_docs' + os.sep + file, config['leaders-documents-path'] + file)))
+                    args=(webdav, 'leaders_docs' + os.sep + file, leaders_path + file)))
         for file in os.listdir('students_docs'):
             if config['overwrite-existing-documents'] or students_documents_names.count(os.path.splitext(file)[0]) == 0:
                 threads.append(multiprocessing.Process(
                     target=upload,
-                    args=(webdav, 'students_docs' + os.sep + file, config['students-documents-path'] + file)))
+                    args=(webdav, 'students_docs' + os.sep + file, students_path + file)))
 
         print('Загрузка документов на диск.')
         do_threads(threads, config['threads-count'])
